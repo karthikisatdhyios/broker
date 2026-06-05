@@ -1,0 +1,45 @@
+# Render Blueprint — deploys the Express backend with a persistent disk so that
+# the NeDB datastore, uploaded images, and node-cron scheduler all keep working.
+#
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. On render.com → New → Blueprint → pick this repo.
+#   3. Render reads this file and provisions the service + disk.
+#   4. After it deploys, set CLIENT_ORIGIN to your Vercel URL (see envVars below).
+#
+# NOTE: Persistent disks require a paid instance type (starter or higher).
+#       On the free plan the disk is dropped and the service sleeps when idle,
+#       which also pauses cron — fine for a demo, not for real persistence.
+services:
+  - type: web
+    name: broker-collab-api
+    runtime: node
+    rootDir: backend
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: broker-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      # Store the database and uploads on the persistent disk.
+      - key: DATA_DIR
+        value: /var/data/db
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      # Auto-generate a strong secret on first deploy.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      # Set this to your deployed frontend origin after the Vercel deploy,
+      # e.g. https://broker-collab.vercel.app
+      - key: CLIENT_ORIGIN
+        sync: false

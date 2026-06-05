@@ -1,0 +1,50 @@
+import { createModel } from '../db/odm.js';
+
+export const Property = createModel('Property', {
+  refs: { broker: 'User', tenant: 'Tenant' },
+  defaults: {
+    broker: null,
+    title: '',
+    address: '',
+    city: '',
+    location: () => ({ lat: 0, lng: 0 }),
+    rent: 0,
+    bedrooms: 0,
+    propertyType: 'Apartment',
+    furnishing: 'Semi-furnished',
+    tenantPreference: 'Any',
+    petsAllowed: false,
+    photos: () => [],
+    landlordName: '',
+    landlordContact: '',
+    commissionSplit: '50% of 1 month',
+    notes: '',
+    status: 'available',
+    postedAt: () => new Date(),
+    expiresAt: null,
+    rentedAt: null,
+    tenant: null,
+  },
+  methods: {
+    toMapJSON() {
+      return {
+        id: this._id,
+        title: this.title,
+        address: this.address,
+        city: this.city,
+        location: this.location,
+        rent: this.rent,
+        bedrooms: this.bedrooms,
+        propertyType: this.propertyType,
+        furnishing: this.furnishing,
+        tenantPreference: this.tenantPreference,
+        petsAllowed: this.petsAllowed,
+        photos: this.photos,
+        commissionSplit: this.commissionSplit,
+        status: this.status,
+        postedAt: this.postedAt,
+        expiresAt: this.expiresAt,
+      };
+    },
+  },
+});
