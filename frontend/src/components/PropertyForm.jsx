@@ -129,7 +129,7 @@ export default function PropertyForm({ onCreated }) {
       <div className="field">
         <label>Photos</label>
         <input className="input" type="file" accept="image/*" multiple onChange={(e) => setPhotos([...e.target.files])} />
-        <div className="help">Up to 6 images. Stored locally in the backend uploads folder.</div>
+        <div className="help">Up to 6 images. Uploaded securely to AWS S3.</div>
       </div>
       <div className="field">
         <label>Notes</label>

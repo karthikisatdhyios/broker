@@ -1,24 +1,21 @@
-import path from 'node:path';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import Datastore from '@seald-io/nedb';
+import crypto from 'node:crypto';
+import { getDb } from '../config/db.js';
 
 /**
- * A tiny Mongoose-like ODM over NeDB (pure-JS, file-backed).
- * Implements just the subset of the Mongoose API this project uses:
+ * A tiny Mongoose-like ODM over the native MongoDB driver. It implements just
+ * the subset of the Mongoose API this project uses:
  *   Model.create / find (cursor: sort/limit/populate) / findOne / findById /
  *   findOneAndUpdate / findOneAndDelete / updateOne / updateMany /
  *   countDocuments / deleteMany / new Model().save() / doc.populate()
  *
- * It supports MongoDB-style query operators ($in, $gte, $lte, $or, $regex...)
- * natively via NeDB, so controller query objects work unchanged.
+ * MongoDB-style query operators ($in, $gte, $lte, $or, $regex...) are passed
+ * straight through to the driver, so controller query objects work unchanged.
+ *
+ * Documents use string `_id`s (UUIDs) to keep all existing string-based id
+ * comparisons in controllers/refs stable across database backends.
  */
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../../data');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-
-const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date);
+export const registry = {};
 
 function applyDefaults(defaults, data) {
   const out = {};
@@ -38,14 +35,60 @@ function structuredCloneSafe(v) {
 // Convert a "plain" update (no $ operators) into a $set update.
 function normalizeUpdate(update) {
   const hasOp = Object.keys(update).some((k) => k.startsWith('$'));
-  return hasOp ? update : { $set: update };
+  return hasOp ? { ...update } : { $set: { ...update } };
+}
+
+// id helpers: collapse a possible Document/Objectish to its string id.
+function collapseRef(v) {
+  if (v == null) return v;
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && v._id) return v._id;
+  return v;
+}
+
+// "name agency email" -> { name: 1, agency: 1, email: 1 }
+function selToProjection(select) {
+  if (!select) return null;
+  const proj = {};
+  String(select)
+    .split(/\s+/)
+    .filter(Boolean)
+    .forEach((f) => {
+      proj[f] = 1;
+    });
+  return Object.keys(proj).length ? proj : null;
+}
+
+// Some driver versions return { value } from findOneAndUpdate/Delete, others
+// return the document directly. Normalize both.
+function unwrap(res) {
+  if (res && typeof res === 'object' && 'value' in res && !('_id' in res)) {
+    return res.value;
+  }
+  return res;
 }
 
 export function createModel(name, options = {}) {
   const { defaults = {}, methods = {}, refs = {}, indexes = [], timestamps = true } = options;
 
-  const ds = new Datastore({ filename: path.join(DATA_DIR, `${name}.db`), autoload: true });
-  indexes.forEach((idx) => ds.ensureIndex(idx, () => {}));
+  let indexPromise = null;
+  async function col() {
+    const db = await getDb();
+    const c = db.collection(name);
+    if (indexPromise === null) {
+      indexPromise = indexes.length
+        ? Promise.all(
+            indexes.map((idx) =>
+              c
+                .createIndex({ [idx.fieldName]: 1 }, { unique: !!idx.unique })
+                .catch(() => {})
+            )
+          )
+        : Promise.resolve();
+    }
+    await indexPromise;
+    return c;
+  }
 
   class Document {
     constructor(data = {}, { isNew = true } = {}) {
@@ -58,11 +101,7 @@ export function createModel(name, options = {}) {
       const rec = {};
       for (const [k, v] of Object.entries(this)) {
         if (typeof v === 'function') continue;
-        if (refs[k]) {
-          rec[k] = collapseRef(v);
-        } else {
-          rec[k] = v;
-        }
+        rec[k] = refs[k] ? collapseRef(v) : v;
       }
       return rec;
     }
@@ -77,36 +116,35 @@ export function createModel(name, options = {}) {
         if (this.$isNew && !this.createdAt) this.createdAt = now;
         this.updatedAt = now;
       }
+      if (!this._id) this._id = crypto.randomUUID();
       const rec = this.toRecord();
-      if (this.$isNew || !this._id) {
-        const inserted = await ds.insertAsync(rec);
-        this._id = inserted._id;
-        this.$isNew = false;
-      } else {
-        await ds.updateAsync({ _id: this._id }, rec, {});
-      }
+      rec._id = this._id;
+      const c = await col();
+      await c.replaceOne({ _id: this._id }, rec, { upsert: true });
+      this.$isNew = false;
       return this;
     }
 
     async populate(arg, select) {
       const list = Array.isArray(arg) ? arg : [{ path: arg, select }];
-      for (const { path: p } of list) {
+      for (const item of list) {
+        const p = item.path;
         const refName = refs[p];
         if (!refName) continue;
         const RefModel = registry[refName];
         if (!RefModel) continue;
+        const proj = selToProjection(item.select);
         const val = this[p];
         if (Array.isArray(val)) {
-          this[p] = await Promise.all(val.map((id) => RefModel.findById(collapseRef(id))));
+          this[p] = await Promise.all(val.map((id) => RefModel.findByIdRaw(collapseRef(id), proj)));
         } else if (val) {
-          this[p] = await RefModel.findById(collapseRef(val));
+          this[p] = await RefModel.findByIdRaw(collapseRef(val), proj);
         }
       }
       return this;
     }
   }
 
-  // attach custom instance methods
   for (const [mName, fn] of Object.entries(methods)) {
     Document.prototype[mName] = fn;
   }
@@ -128,10 +166,11 @@ export function createModel(name, options = {}) {
     limit(n) { this._limit = n; return this; }
     populate(p, select) { this._populate.push({ path: p, select }); return this; }
     async exec() {
-      let cur = ds.find(this._filter);
-      if (this._sort) cur = cur.sort(this._sort);
-      if (this._limit != null) cur = cur.limit(this._limit);
-      const raws = await cur.execAsync();
+      const c = await col();
+      let cursor = c.find(this._filter);
+      if (this._sort) cursor = cursor.sort(this._sort);
+      if (this._limit != null) cursor = cursor.limit(this._limit);
+      const raws = await cursor.toArray();
       const docs = raws.map(hydrate);
       if (this._populate.length) {
         await Promise.all(docs.map((d) => d.populate(this._populate)));
@@ -142,8 +181,6 @@ export function createModel(name, options = {}) {
     catch(cb) { return this.exec().catch(cb); }
   }
 
-  // Attach statics directly to the Document class so both `new Model(data)`
-  // and `Model.find(...)` work like Mongoose.
   const statics = {
     modelName: name,
 
@@ -161,53 +198,60 @@ export function createModel(name, options = {}) {
     },
 
     async findOne(filter = {}) {
-      const raw = await ds.findOneAsync(filter);
-      return hydrate(raw);
+      const c = await col();
+      return hydrate(await c.findOne(filter));
     },
 
     async findById(id) {
       if (!id) return null;
-      const raw = await ds.findOneAsync({ _id: collapseRef(id) });
-      return hydrate(raw);
+      const c = await col();
+      return hydrate(await c.findOne({ _id: collapseRef(id) }));
+    },
+
+    // Plain projected object (used by populate). Always includes _id.
+    async findByIdRaw(id, projection) {
+      if (!id) return null;
+      const c = await col();
+      return c.findOne({ _id: collapseRef(id) }, projection ? { projection } : undefined);
     },
 
     async findOneAndUpdate(filter, update) {
-      const res = await ds.updateAsync(filter, normalizeUpdate(update), {
-        multi: false,
-        returnUpdatedDocs: true,
-      });
-      const updated = res.affectedDocuments;
-      if (!updated) return null;
+      const c = await col();
+      const upd = normalizeUpdate(update);
       if (timestamps) {
-        await ds.updateAsync({ _id: updated._id }, { $set: { updatedAt: new Date() } }, {});
+        upd.$set = { ...(upd.$set || {}), updatedAt: new Date() };
       }
-      return statics.findById(updated._id);
+      const res = await c.findOneAndUpdate(filter, upd, { returnDocument: 'after' });
+      return hydrate(unwrap(res));
     },
 
     async findOneAndDelete(filter) {
-      const raw = await ds.findOneAsync(filter);
-      if (!raw) return null;
-      await ds.removeAsync({ _id: raw._id }, { multi: false });
-      return hydrate(raw);
+      const c = await col();
+      const res = await c.findOneAndDelete(filter);
+      return hydrate(unwrap(res));
     },
 
     async updateOne(filter, update) {
-      const res = await ds.updateAsync(filter, normalizeUpdate(update), { multi: false });
-      return { modifiedCount: res?.numAffected ?? res ?? 0 };
+      const c = await col();
+      const r = await c.updateOne(filter, normalizeUpdate(update));
+      return { modifiedCount: r.modifiedCount ?? 0 };
     },
 
     async updateMany(filter, update) {
-      const res = await ds.updateAsync(filter, normalizeUpdate(update), { multi: true });
-      return { modifiedCount: res?.numAffected ?? res ?? 0 };
+      const c = await col();
+      const r = await c.updateMany(filter, normalizeUpdate(update));
+      return { modifiedCount: r.modifiedCount ?? 0 };
     },
 
     async countDocuments(filter = {}) {
-      return ds.countAsync(filter);
+      const c = await col();
+      return c.countDocuments(filter);
     },
 
     async deleteMany(filter = {}) {
-      const n = await ds.removeAsync(filter, { multi: true });
-      return { deletedCount: n };
+      const c = await col();
+      const r = await c.deleteMany(filter);
+      return { deletedCount: r.deletedCount ?? 0 };
     },
   };
 
@@ -215,13 +259,3 @@ export function createModel(name, options = {}) {
   registry[name] = Document;
   return Document;
 }
-
-// id helpers: collapse a possible Document/Objectish to its string id.
-function collapseRef(v) {
-  if (v == null) return v;
-  if (typeof v === 'string') return v;
-  if (typeof v === 'object' && v._id) return v._id;
-  return v;
-}
-
-export const registry = {};

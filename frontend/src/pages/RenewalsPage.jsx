@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client.js';
 import { inr, fmtDate } from '../utils/format.js';
+import { copyToClipboard } from '../utils/clipboard.js';
 
 export default function RenewalsPage() {
   const [tenants, setTenants] = useState([]);
@@ -16,7 +17,10 @@ export default function RenewalsPage() {
 
   const flash = (m) => { setToast(m); setTimeout(() => setToast(''), 2000); };
   const contacted = async (id) => { await api.post(`/tenants/${id}/renewal-contacted`); flash('Marked as contacted'); load(); };
-  const copy = (txt) => { navigator.clipboard?.writeText(txt); flash('Copied: ' + txt); };
+  const copy = async (txt) => {
+    const ok = await copyToClipboard(txt);
+    flash(ok ? 'Copied: ' + txt : 'Copy failed — long-press to copy: ' + txt);
+  };
 
   const badge = (d) => (d < 0 ? 'red' : d <= 7 ? 'red' : d <= 15 ? 'amber' : 'green');
 

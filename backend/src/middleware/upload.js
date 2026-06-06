@@ -1,26 +1,23 @@
 import multer from 'multer';
-import path from 'node:path';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { config } from '../config/index.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// In production point UPLOAD_DIR at a persistent disk (e.g. Render disk mount)
-// so uploaded images survive restarts/redeploys.
-const uploadsDir = process.env.UPLOAD_DIR
-  ? path.resolve(process.env.UPLOAD_DIR)
-  : path.resolve(__dirname, '../../uploads');
+/**
+ * Images are buffered in memory by multer, then streamed to S3 so they persist
+ * outside the API server. `uploadImage` returns a public URL which is stored on
+ * the property document.
+ */
 
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadsDir),
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const safe = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, safe);
-  },
+const storage = multer.memoryStorage();
+const s3 = new S3Client({
+  region: config.awsRegion,
+  credentials:
+    config.awsAccessKeyId && config.awsSecretAccessKey
+      ? {
+          accessKeyId: config.awsAccessKeyId,
+          secretAccessKey: config.awsSecretAccessKey,
+        }
+      : undefined,
 });
 
 const fileFilter = (_req, file, cb) => {
@@ -34,4 +31,24 @@ export const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024, files: 6 },
 });
 
-export const UPLOADS_DIR = uploadsDir;
+export async function uploadImage(file) {
+  if (!config.awsS3Bucket) {
+    throw new Error('AWS_S3_BUCKET is not configured');
+  }
+
+  const ext = (file.originalname.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+  const key = `properties/${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: config.awsS3Bucket,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+    })
+  );
+
+  const base =
+    config.awsS3PublicBaseUrl ||
+    `https://${config.awsS3Bucket}.s3.${config.awsRegion}.amazonaws.com`;
+  return `${base.replace(/\/$/, '')}/${key}`;
+}

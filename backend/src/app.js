@@ -1,18 +1,13 @@
 import express from 'express';
 import cors from 'cors';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { config } from './config/index.js';
 import apiRoutes from './routes/index.js';
-import { UPLOADS_DIR } from './middleware/upload.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export function createApp() {
   const app = express();
 
-  // Behind a hosting proxy (Render/Railway/etc.) so req.protocol reflects the
-  // original https scheme — this keeps generated image URLs https (no mixed content).
+  // Behind a hosting proxy/load balancer (Elastic Beanstalk/App Runner/etc.) so
+  // req.protocol reflects the original https.
   app.set('trust proxy', 1);
 
   app.use(
@@ -24,11 +19,19 @@ export function createApp() {
       },
     })
   );
-  app.use(express.json({ limit: '2mb' }));
-  app.use(express.urlencoded({ extended: true }));
-
-  // Serve uploaded images
-  app.use('/uploads', express.static(UPLOADS_DIR));
+  // Body parsing that's safe behind platforms that may pre-parse JSON bodies.
+  const jsonParser = express.json({ limit: '2mb' });
+  const formParser = express.urlencoded({ extended: true });
+  app.use((req, res, next) => {
+    const ct = req.headers['content-type'] || '';
+    if (ct.includes('application/json') && req.body && typeof req.body === 'object') {
+      return next();
+    }
+    jsonParser(req, res, (err) => {
+      if (err) return next(err);
+      formParser(req, res, next);
+    });
+  });
 
   app.use('/api', apiRoutes);
 

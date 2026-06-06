@@ -1,24 +1,51 @@
-import path from 'node:path';
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.DATA_DIR || path.resolve(__dirname, '../../data');
+import { MongoClient } from 'mongodb';
+import { config } from './index.js';
 
 /**
- * Persistence uses NeDB (pure-JS, file-backed) so the app runs with ZERO
- * external setup — no database server, no Docker, no binary downloads.
- * Each collection is stored as an append-only file under backend/data/.
+ * MongoDB connection helper, designed for serverless (Vercel) where the same
+ * Node instance is reused across invocations ("warm starts"). We cache the
+ * connecting client promise on globalThis so we never open more than one pool
+ * per instance.
  *
- * To swap in MongoDB/Postgres later, replace src/db/odm.js with a driver of
- * your choice; the models/controllers use a Mongoose-like API.
+ * Set MONGODB_URI to your MongoDB Atlas connection string. The models talk to
+ * a tiny Mongoose-like ODM (src/db/odm.js) so controllers stay unchanged.
  */
+
+function makeClient() {
+  if (!config.mongoUri) {
+    throw new Error(
+      'MONGODB_URI is not set. Provide a MongoDB connection string (e.g. from MongoDB Atlas).'
+    );
+  }
+  return new MongoClient(config.mongoUri, { maxPoolSize: 10 });
+}
+
+let clientPromise = globalThis.__brokerMongoClient || null;
+
+export function getClientPromise() {
+  if (!clientPromise) {
+    clientPromise = makeClient().connect();
+    globalThis.__brokerMongoClient = clientPromise;
+  }
+  return clientPromise;
+}
+
+export async function getDb() {
+  const client = await getClientPromise();
+  return client.db(config.mongoDb);
+}
+
 export async function connectDB() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  console.log(`[db] Using file-backed datastore at ${DATA_DIR}`);
-  return DATA_DIR;
+  await getClientPromise();
+  console.log(`[db] Connected to MongoDB database "${config.mongoDb}"`);
+  return getDb();
 }
 
 export async function disconnectDB() {
-  // NeDB has no persistent connection to close.
+  if (clientPromise) {
+    const client = await clientPromise;
+    await client.close();
+    clientPromise = null;
+    globalThis.__brokerMongoClient = null;
+  }
 }

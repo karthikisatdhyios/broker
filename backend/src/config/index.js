@@ -7,17 +7,26 @@ const num = (v, fallback) => {
 };
 
 export const config = {
-  port: num(process.env.PORT, 5200),
+  port: num(process.env.PORT, 5000),
   nodeEnv: process.env.NODE_ENV || 'development',
   clientOrigins: (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
 
-  mongoUri: process.env.MONGO_URI || '',
+  mongoUri: process.env.MONGODB_URI || process.env.MONGO_URI || '',
+  mongoDb: process.env.MONGODB_DB || 'broker_collab',
 
   jwtSecret: process.env.JWT_SECRET || 'dev_insecure_secret_change_me',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+
+  cronSecret: process.env.CRON_SECRET || '',
+
+  awsRegion: process.env.AWS_REGION || 'ap-south-1',
+  awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+  awsS3Bucket: process.env.AWS_S3_BUCKET || '',
+  awsS3PublicBaseUrl: process.env.AWS_S3_PUBLIC_BASE_URL || '',
 
   propertyExpiryHours: num(process.env.PROPERTY_EXPIRY_HOURS, 48),
   leadExpiryDays: num(process.env.LEAD_EXPIRY_DAYS, 21),

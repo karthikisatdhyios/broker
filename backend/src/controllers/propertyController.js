@@ -4,10 +4,7 @@ import { config } from '../config/index.js';
 import { geocodeAddress } from '../utils/geocode.js';
 import { addHours, addMonths } from '../utils/time.js';
 import { requireValidContactFields } from '../utils/validation.js';
-
-function fileToUrl(req, filename) {
-  return `${req.protocol}://${req.get('host')}/uploads/${filename}`;
-}
+import { uploadImage } from '../middleware/upload.js';
 
 async function withBrokerContact(prop) {
   await prop.populate('broker', 'name phone agency email');
@@ -68,7 +65,7 @@ export async function createProperty(req, res) {
     });
   }
 
-  const photos = (req.files || []).map((f) => fileToUrl(req, f.filename));
+  const photos = await Promise.all((req.files || []).map((f) => uploadImage(f)));
 
   const now = new Date();
   const property = await Property.create({
